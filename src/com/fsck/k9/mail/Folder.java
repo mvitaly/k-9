@@ -212,4 +212,8 @@ public abstract class Folder {
     public Account getAccount() {
         return mAccount;
     }
+
+	public boolean isSyncMode() {
+		return false;
+	}
 }
