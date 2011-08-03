@@ -377,12 +377,12 @@ public class ImapStore extends Store {
             if (ImapResponseParser.equalsIgnoreCase(response.get(0), commandResponse)) {
                 boolean includeFolder = true;
 
-                String folder;
+                String decodedFolderName;
                 try {
-                    folder = decodeFolderName(response.getString(3));
+                    decodedFolderName = decodeFolderName(response.getString(3));
                 } catch (CharacterCodingException e) {
                     Log.w(K9.LOG_TAG, "Folder name not correctly encoded with the UTF-7 variant " +
-                            "as defined by RFC 3501: " + response.getString(3), e);
+                          "as defined by RFC 3501: " + response.getString(3), e);
 
                     //TODO: Use the raw name returned by the server for all commands that require
                     //      a folder name. Use the decoded name only for showing it to the user.
@@ -390,6 +390,8 @@ public class ImapStore extends Store {
                     // We currently just skip folders with malformed names.
                     continue;
                 }
+
+                String folder = decodedFolderName;
 
                 if (mPathDelimeter == null) {
                     mPathDelimeter = response.getString(2);
@@ -406,12 +408,13 @@ public class ImapStore extends Store {
                      */
                     continue;
                 } else {
-
-                    if (getCombinedPrefix().length() > 0) {
-                        if (folder.length() >= getCombinedPrefix().length()) {
-                            folder = folder.substring(getCombinedPrefix().length());
+                    int prefixLength = getCombinedPrefix().length();
+                    if (prefixLength > 0) {
+                        // Strip prefix from the folder name
+                        if (folder.length() >= prefixLength) {
+                            folder = folder.substring(prefixLength);
                         }
-                        if (!folder.equalsIgnoreCase(getCombinedPrefix() + folder)) {
+                        if (!decodedFolderName.equalsIgnoreCase(getCombinedPrefix() + folder)) {
                             includeFolder = false;
                         }
                     }
@@ -1107,7 +1110,12 @@ public class ImapStore extends Store {
                 fetchFields.add("BODYSTRUCTURE");
             }
             if (fp.contains(FetchProfile.Item.BODY_SANE)) {
-                fetchFields.add(String.format("BODY.PEEK[]<0.%d>", mAccount.getMaximumAutoDownloadMessageSize()));
+                // If the user wants to download unlimited-size messages, don't go only for the truncated body
+                if (mAccount.getMaximumAutoDownloadMessageSize() > 0) {
+                    fetchFields.add(String.format("BODY.PEEK[]<0.%d>", mAccount.getMaximumAutoDownloadMessageSize()));
+                } else {
+                    fetchFields.add("BODY.PEEK[]");
+                }
             }
             if (fp.contains(FetchProfile.Item.BODY)) {
                 fetchFields.add("BODY.PEEK[]");

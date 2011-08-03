@@ -50,6 +50,7 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Stack;
 import java.util.zip.GZIPInputStream;
 
@@ -1224,6 +1225,9 @@ public class WebDavStore extends Store {
             if (dataset != null) {
                 messageCount = dataset.getMessageCount();
             }
+            if (K9.DEBUG && K9.DEBUG_PROTOCOL_WEBDAV) {
+                Log.v(K9.LOG_TAG, "Counted messages and webdav returned: "+messageCount);
+            }
 
             return messageCount;
         }
@@ -1410,7 +1414,11 @@ public class WebDavStore extends Store {
             }
 
             if (fp.contains(FetchProfile.Item.BODY_SANE)) {
-                fetchMessages(messages, listener, (mAccount.getMaximumAutoDownloadMessageSize() / 76));
+                if (mAccount.getMaximumAutoDownloadMessageSize() > 0) {
+                    fetchMessages(messages, listener, (mAccount.getMaximumAutoDownloadMessageSize() / 76));
+                } else {
+                    fetchMessages(messages, listener, -1);
+                }
             }
             if (fp.contains(FetchProfile.Item.BODY)) {
                 fetchMessages(messages, listener, -1);
@@ -1579,13 +1587,17 @@ public class WebDavStore extends Store {
                 WebDavMessage wdMessage = (WebDavMessage) messages[i];
 
                 if (listener != null) {
-                    listener.messageStarted(messages[i].getUid(), i, count);
+                    listener.messageStarted(wdMessage.getUid(), i, count);
                 }
 
-                wdMessage.setFlagInternal(Flag.SEEN, uidToReadStatus.get(wdMessage.getUid()));
+                try { 
+                    wdMessage.setFlagInternal(Flag.SEEN, uidToReadStatus.get(wdMessage.getUid()));
+                } catch (NullPointerException e) {
+                    Log.v(K9.LOG_TAG,"Under some weird circumstances, setting the read status when syncing from webdav threw an NPE. Skipping.");
+                }
 
                 if (listener != null) {
-                    listener.messageFinished(messages[i], i, count);
+                    listener.messageFinished(wdMessage, i, count);
                 }
             }
         }
@@ -1647,8 +1659,13 @@ public class WebDavStore extends Store {
                     listener.messageStarted(messages[i].getUid(), i, count);
                 }
 
-                wdMessage.setNewHeaders(envelopes.get(wdMessage.getUid()));
-                wdMessage.setFlagInternal(Flag.SEEN, envelopes.get(wdMessage.getUid()).getReadStatus());
+                ParsedMessageEnvelope envelope = envelopes.get(wdMessage.getUid());
+                if (envelope != null) {
+                    wdMessage.setNewHeaders(envelope);
+                    wdMessage.setFlagInternal(Flag.SEEN, envelope.getReadStatus());
+                } else {
+                    Log.e(K9.LOG_TAG,"Asked to get metadata for a non-existent message: "+wdMessage.getUid());
+                }
 
                 if (listener != null) {
                     listener.messageFinished(messages[i], i, count);
@@ -2043,12 +2060,12 @@ public class WebDavStore extends Store {
     public class DataSet {
         private HashMap<String, HashMap<String, String>> mData = new HashMap<String, HashMap<String, String>>();
         // private HashMap<String, String> mLostData = new HashMap<String, String>();
-        private String mUid = "";
+        private StringBuilder mUid = new StringBuilder();
         private HashMap<String, String> mTempData = new HashMap<String, String>();
 
         public void addValue(String value, String tagName) {
             if (tagName.equals("uid")) {
-                mUid = value;
+                mUid.append(value);
             }
 
             if (mTempData.containsKey(tagName)) {
@@ -2059,9 +2076,10 @@ public class WebDavStore extends Store {
         }
 
         public void finish() {
-            if (mUid != null &&
+            String uid = mUid.toString();
+            if (!uid.equals("") &&
                     mTempData != null) {
-                mData.put(mUid, mTempData);
+                mData.put(uid, mTempData);
             } else if (mTempData != null) {
                 /*
                  * Lost Data are for requests that don't include a message UID. These requests should only have a depth
@@ -2069,7 +2087,7 @@ public class WebDavStore extends Store {
                  */
             }
 
-            mUid = "";
+            mUid = new StringBuilder();
             mTempData = new HashMap<String, String>();
         }
 
@@ -2111,10 +2129,14 @@ public class WebDavStore extends Store {
             for (String uid : mData.keySet()) {
                 HashMap<String, String> data = mData.get(uid);
                 String readStatus = data.get("read");
-                if (readStatus != null &&
-                        !readStatus.equals("")) {
+                if (readStatus != null && !readStatus.equals("")) {
                     Boolean value = !readStatus.equals("0");
                     uidToRead.put(uid, value);
+                } else {
+                    // We don't actually want to have null values in our hashmap,
+                    // as it causes the calling code to crash with an NPE as it
+                    // does a lookup in the maap.
+                    uidToRead.put(uid, false);
                 }
             }
 
@@ -2153,7 +2175,12 @@ public class WebDavStore extends Store {
          * Returns the message count as it was retrieved
          */
         public int getMessageCount() {
-            int messageCount = -1;
+            // It appears that Exchange is returning responses
+            // without a visiblecount element for empty folders
+            // Which resulted in this code returning -1 (as that was
+            // the previous default.)
+            // -1 is an error condition. Now the default is empty
+            int messageCount = 0;
 
             for (String uid : mData.keySet()) {
                 HashMap<String, String> data = mData.get(uid);
@@ -2195,8 +2222,8 @@ public class WebDavStore extends Store {
                             String date = data.get(header);
                             date = date.substring(0, date.length() - 1);
 
-                            DateFormat dfInput = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS");
-                            DateFormat dfOutput = new SimpleDateFormat("EEE, d MMM yy HH:mm:ss Z");
+                            DateFormat dfInput = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", Locale.US);
+                            DateFormat dfOutput = new SimpleDateFormat("EEE, d MMM yy HH:mm:ss Z", Locale.US);
                             String tempDate = "";
 
                             try {

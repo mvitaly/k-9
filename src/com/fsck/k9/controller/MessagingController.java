@@ -793,7 +793,7 @@ public class MessagingController implements Runnable {
             LocalStore localStore = account.getLocalStore();
             LocalFolder localFolder = localStore.getFolder(folder);
             if (localFolder.getVisibleLimit() > 0) {
-                localFolder.setVisibleLimit(localFolder.getVisibleLimit() + account.getDisplayCount());
+                localFolder.setVisibleLimit(localFolder.getVisibleLimit() + localFolder.getMessageCount());
             }
             synchronizeMailbox(account, folder, listener, null);
         } catch (MessagingException me) {
@@ -1172,11 +1172,31 @@ public class MessagingController implements Runnable {
         }
     }
 
+    /**
+     * Fetches the messages described by inputMessages from the remote store and writes them to
+     * local storage.
+     *
+     * @param account
+     *            The account the remote store belongs to.
+     * @param remoteFolder
+     *            The remote folder to download messages from.
+     * @param localFolder
+     *            The {@link LocalFolder} instance corresponding to the remote folder.
+     * @param inputMessages
+     *            A list of messages objects that store the UIDs of which messages to download.
+     * @param flagSyncOnly
+     *            Only flags will be fetched from the remote store if this is {@code true}.
+     *
+     * @return The number of downloaded messages that are not flagged as {@link Flag#SEEN}.
+     *
+     * @throws MessagingException
+     */
     private int downloadMessages(final Account account, final Folder remoteFolder,
-                                 final LocalFolder localFolder, List<Message> inputMessages, boolean flagSyncOnly) throws MessagingException {
+                                 final LocalFolder localFolder, List<Message> inputMessages,
+                                 boolean flagSyncOnly) throws MessagingException {
+
         final Date earliestDate = account.getEarliestPollDate();
         Date downloadStarted = new Date(); // now
-
 
         if (earliestDate != null) {
             if (K9.DEBUG) {
@@ -1432,7 +1452,8 @@ public class MessagingController implements Runnable {
                         return;
                     }
 
-                    if (message.getSize() > account.getMaximumAutoDownloadMessageSize()) {
+                    if (account.getMaximumAutoDownloadMessageSize() > 0 &&
+                    message.getSize() > account.getMaximumAutoDownloadMessageSize()) {
                         largeMessages.add(message);
                     } else {
                         smallMessages.add(message);
@@ -1524,7 +1545,7 @@ public class MessagingController implements Runnable {
             return false;
 
         }
-        if (message.olderThan(earliestDate)) {
+        if (account.isSearchByDateCapable() && message.olderThan(earliestDate)) {
             if (K9.DEBUG) {
                 Log.d(K9.LOG_TAG, "Message " + message.getUid() + " is older than "
                       + earliestDate + ", hence not saving");
@@ -1552,7 +1573,7 @@ public class MessagingController implements Runnable {
         remoteFolder.fetch(smallMessages.toArray(new Message[smallMessages.size()]),
         fp, new MessageRetrievalListener() {
             @Override
-            public void messageFinished(Message message, int number, int ofTotal) {
+            public void messageFinished(final Message message, int number, int ofTotal) {
                 try {
 
                     if (!shouldImportMessage(account, folder, message, progress, earliestDate)) {
@@ -1568,6 +1589,13 @@ public class MessagingController implements Runnable {
                             progress.incrementAndGet();
                         }
                     });
+
+                    // Increment the number of "new messages" if the newly downloaded message is
+                    // not marked as read.
+                    if (!localMessage.isSet(Flag.SEEN)) {
+                        newMessages.incrementAndGet();
+                    }
+
                     if (K9.DEBUG)
                         Log.v(K9.LOG_TAG, "About to notify listeners that we got a new small message "
                               + account + ":" + folder + ":" + message.getUid());
@@ -1583,7 +1611,6 @@ public class MessagingController implements Runnable {
                     // Send a notification of this message
 
                     if (shouldNotifyForMessage(account, localFolder, message)) {
-                        newMessages.incrementAndGet();
                         notifyAccount(mApplication, account, message, unreadBeforeStart, newMessages);
                     }
 
@@ -1659,8 +1686,11 @@ public class MessagingController implements Runnable {
                      * the account's autodownload size limit, otherwise mark as only a partial
                      * download.  This will prevent the system from downloading the same message
                      * twice.
+                     *
+                     * If there is no limit on autodownload size, that's the same as the message
+                     * being smaller than the max size
                      */
-                    if (message.getSize() < account.getMaximumAutoDownloadMessageSize()) {
+                    if (account.getMaximumAutoDownloadMessageSize() == 0 || message.getSize() < account.getMaximumAutoDownloadMessageSize()) {
                         localMessage.setFlag(Flag.X_DOWNLOADED_FULL, true);
                     } else {
                         // Set a flag indicating that the message has been partially downloaded and
@@ -1702,6 +1732,13 @@ public class MessagingController implements Runnable {
             // Update the listener with what we've found
             progress.incrementAndGet();
             Message localMessage = localFolder.getMessage(message.getUid());
+
+            // Increment the number of "new messages" if the newly downloaded message is
+            // not marked as read.
+            if (!localMessage.isSet(Flag.SEEN)) {
+                newMessages.incrementAndGet();
+            }
+
             for (MessagingListener l : getListeners()) {
                 l.synchronizeMailboxAddOrUpdateMessage(account, folder, localMessage);
                 l.synchronizeMailboxProgress(account, folder, progress.get(), todo);
@@ -1712,7 +1749,6 @@ public class MessagingController implements Runnable {
 
             // Send a notification of this message
             if (shouldNotifyForMessage(account, localFolder, message)) {
-                newMessages.incrementAndGet();
                 notifyAccount(mApplication, account, message, unreadBeforeStart, newMessages);
             }
 
@@ -2185,14 +2221,7 @@ public class MessagingController implements Runnable {
 
         Store remoteStore = account.getRemoteStore();
         Folder remoteFolder = remoteStore.getFolder(folder);
-        if (!remoteFolder.exists() ||
-                /*
-                 * Don't proceed if the remote folder doesn't support flags and
-                 * the flag to be changed isn't the deleted flag. This avoids
-                 * unnecessary connections to POP3 servers.
-                 */
-                // TODO: This should actually call a supportsSettingFlag(flag) method.
-                (!remoteFolder.supportsFetchingFlags() && !Flag.DELETED.equals(flag))) {
+        if (!remoteFolder.exists() || !remoteFolder.isFlagSupported(flag)) {
             return;
         }
 
@@ -2396,7 +2425,7 @@ public class MessagingController implements Runnable {
             Store remoteStore = account.getRemoteStore();
             remoteFolder = remoteStore.getFolder(folder);
 
-            if (!remoteFolder.exists()) {
+            if (!remoteFolder.exists() || !remoteFolder.isFlagSupported(Flag.SEEN)) {
                 return;
             }
             remoteFolder.open(OpenMode.READ_WRITE);
@@ -2724,30 +2753,20 @@ public class MessagingController implements Runnable {
          */
 
         if (part.getBody() != null) {
-            for (MessagingListener l : getListeners()) {
+            for (MessagingListener l : getListeners(listener)) {
                 l.loadAttachmentStarted(account, message, part, tag, false);
             }
-            if (listener != null) {
-                listener.loadAttachmentStarted(account, message, part, tag, false);
-            }
 
-            for (MessagingListener l : getListeners()) {
+            for (MessagingListener l : getListeners(listener)) {
                 l.loadAttachmentFinished(account, message, part, tag);
-            }
-
-            if (listener != null) {
-                listener.loadAttachmentFinished(account, message, part, tag);
             }
             return;
         }
 
 
 
-        for (MessagingListener l : getListeners()) {
+        for (MessagingListener l : getListeners(listener)) {
             l.loadAttachmentStarted(account, message, part, tag, true);
-        }
-        if (listener != null) {
-            listener.loadAttachmentStarted(account, message, part, tag, false);
         }
 
         put("loadAttachment", listener, new Runnable() {
@@ -2775,21 +2794,15 @@ public class MessagingController implements Runnable {
                     remoteFolder.fetchPart(remoteMessage, part, null);
 
                     localFolder.updateMessage((LocalMessage)message);
-                    for (MessagingListener l : getListeners()) {
+                    for (MessagingListener l : getListeners(listener)) {
                         l.loadAttachmentFinished(account, message, part, tag);
-                    }
-                    if (listener != null) {
-                        listener.loadAttachmentFinished(account, message, part, tag);
                     }
                 } catch (MessagingException me) {
                     if (K9.DEBUG)
                         Log.v(K9.LOG_TAG, "Exception loading attachment", me);
 
-                    for (MessagingListener l : getListeners()) {
+                    for (MessagingListener l : getListeners(listener)) {
                         l.loadAttachmentFailed(account, message, part, tag, me.getMessage());
-                    }
-                    if (listener != null) {
-                        listener.loadAttachmentFailed(account, message, part, tag, me.getMessage());
                     }
                     addErrorMessage(account, null, me);
 
@@ -3353,10 +3366,7 @@ public class MessagingController implements Runnable {
             //We need to make these callbacks before moving the messages to the trash
             //as messages get a new UID after being moved
             for (Message message : messages) {
-                if (listener != null) {
-                    listener.messageDeleted(account, folder, message);
-                }
-                for (MessagingListener l : getListeners()) {
+                for (MessagingListener l : getListeners(listener)) {
                     l.messageDeleted(account, folder, message);
                 }
             }
@@ -3795,10 +3805,7 @@ public class MessagingController implements Runnable {
                     long oldSize = localStore.getSize();
                     localStore.compact();
                     long newSize = localStore.getSize();
-                    if (ml != null) {
-                        ml.accountSizeChanged(account, oldSize, newSize);
-                    }
-                    for (MessagingListener l : getListeners()) {
+                    for (MessagingListener l : getListeners(ml)) {
                         l.accountSizeChanged(account, oldSize, newSize);
                     }
                 } catch (UnavailableStorageException e) {
@@ -3825,11 +3832,7 @@ public class MessagingController implements Runnable {
                     stats.size = newSize;
                     stats.unreadMessageCount = 0;
                     stats.flaggedMessageCount = 0;
-                    if (ml != null) {
-                        ml.accountSizeChanged(account, oldSize, newSize);
-                        ml.accountStatusChanged(account, stats);
-                    }
-                    for (MessagingListener l : getListeners()) {
+                    for (MessagingListener l : getListeners(ml)) {
                         l.accountSizeChanged(account, oldSize, newSize);
                         l.accountStatusChanged(account, stats);
                     }
@@ -3857,11 +3860,7 @@ public class MessagingController implements Runnable {
                     stats.size = newSize;
                     stats.unreadMessageCount = 0;
                     stats.flaggedMessageCount = 0;
-                    if (ml != null) {
-                        ml.accountSizeChanged(account, oldSize, newSize);
-                        ml.accountStatusChanged(account, stats);
-                    }
-                    for (MessagingListener l : getListeners()) {
+                    for (MessagingListener l : getListeners(ml)) {
                         l.accountSizeChanged(account, oldSize, newSize);
                         l.accountStatusChanged(account, stats);
                     }
@@ -3877,16 +3876,29 @@ public class MessagingController implements Runnable {
 
 
     private boolean shouldNotifyForMessage(Account account, LocalFolder localFolder, Message message) {
-        // Do not notify if the user does not have notifications
-        // enabled or if the message has been read
-        if (!account.isNotifyNewMail() || message.isSet(Flag.SEEN) || (account.getName() == null)) {
+        // If we don't even have an account name, don't show the notification.
+        // (This happens during initial account setup)
+        if (account.getName() == null) {
             return false;
         }
 
+        // Do not notify if the user does not have notifications enabled or if the message has
+        // been read.
+        if (!account.isNotifyNewMail() || message.isSet(Flag.SEEN)) {
+            return false;
+        }
+
+        // If the account is a POP3 account and the message is older than the oldest message we've
+        // previously seen, then don't notify about it.
+        if (account.getStoreUri().startsWith("pop3") &&
+                message.olderThan(new Date(account.getLatestOldMessageSeenTime()))) {
+            return false;
+        }
+
+        // No notification for new messages in Trash, Drafts, Spam or Sent folder.
+        // But do notify if it's the INBOX (see issue 1817).
         Folder folder = message.getFolder();
         if (folder != null) {
-            // No notification for new messages in Trash, Drafts, Spam or Sent folder.
-            // But do notify if it's the INBOX (see issue 1817).
             String folderName = folder.getName();
             if (!account.getInboxFolderName().equals(folderName) &&
                     (account.getTrashFolderName().equals(folderName)
@@ -3902,7 +3914,8 @@ public class MessagingController implements Runnable {
                 Integer messageUid = Integer.parseInt(message.getUid());
                 if (messageUid <= localFolder.getLastUid()) {
                     if (K9.DEBUG)
-                        Log.d(K9.LOG_TAG, "Message uid is " + messageUid + ", max message uid is " + localFolder.getLastUid() + ".  Skipping notification.");
+                        Log.d(K9.LOG_TAG, "Message uid is " + messageUid + ", max message uid is " +
+                              localFolder.getLastUid() + ".  Skipping notification.");
                     return false;
                 }
             } catch (NumberFormatException e) {
@@ -3910,31 +3923,22 @@ public class MessagingController implements Runnable {
             }
         }
 
-        return true;
+        // Don't notify if the sender address matches one of our identities and the user chose not
+        // to be notified for such messages.
+        if (account.isAnIdentity(message.getFrom()) && !account.isNotifySelfNewMail()) {
+            return false;
+        }
 
+        return true;
     }
 
 
 
-    /** Creates a notification of new email messages
-      * ringtone, lights, and vibration to be played
-    */
-    private boolean notifyAccount(Context context, Account account, Message message, int previousUnreadMessageCount, AtomicInteger newMessageCount) {
-        // If we don't even have an account name, don't show the notification
-        // (This happens during initial account setup)
-        //
-        if (account.getName() == null) {
-            return false;
-        }
-
-        // If the account us a POP3 account and the message is older than
-        // the oldest message we've previously seen then don't notify about it
-        if (account.getStoreUri().startsWith("pop3")) {
-            if (message.olderThan(new Date(account.getLatestOldMessageSeenTime()))) {
-                return false;
-            }
-        }
-
+    /**
+     * Creates a notification of a newly received message.
+     */
+    private void notifyAccount(Context context, Account account, Message message,
+                               int previousUnreadMessageCount, AtomicInteger newMessageCount) {
 
         // If we have a message, set the notification to "<From>: <Subject>"
         StringBuilder messageNotice = new StringBuilder();
@@ -3955,19 +3959,13 @@ public class MessagingController implements Runnable {
                     }
                     // show To: if the message was sent from me
                     else {
-                        if (!account.isNotifySelfNewMail()) {
-                            return false;
-                        }
-
                         Address[] rcpts = message.getRecipients(Message.RecipientType.TO);
                         String to = rcpts.length > 0 ? rcpts[0].toFriendly().toString() : null;
                         if (to != null) {
                             messageNotice.append(String.format(context.getString(R.string.message_to_fmt), to)).append(": ").append(subject);
                         } else {
                             messageNotice.append(context.getString(R.string.general_no_sender)).append(": ").append(subject);
-
                         }
-
                     }
                 }
             }
@@ -3993,7 +3991,7 @@ public class MessagingController implements Runnable {
         Intent i = FolderList.actionHandleNotification(context, account, message.getFolder().getName());
         PendingIntent pi = PendingIntent.getActivity(context, 0, i, 0);
 
-        String accountDescr = (account.getDescription() != null) ? account.getDescription() : account.getEmail(); 
+        String accountDescr = (account.getDescription() != null) ? account.getDescription() : account.getEmail();
         String accountNotice = context.getString(R.string.notification_new_one_account_fmt, unreadCount, accountDescr);
         notif.setLatestEventInfo(context, accountNotice, messageNotice, pi);
 
@@ -4010,7 +4008,6 @@ public class MessagingController implements Runnable {
         configureNotification(notif, (n.shouldRing() ?  n.getRingtone() : null), (n.shouldVibrate() ? n.getVibration() : null), (n.isLed() ?  n.getLedColor()  : null), K9.NOTIFICATION_LED_BLINK_SLOW, ringAndVibrate);
 
         notifMgr.notify(account.getAccountNumber(), notif);
-        return true;
     }
 
     /**
